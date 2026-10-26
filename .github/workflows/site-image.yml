@@ -1,0 +1,51 @@
+# On every push to main: install with npm (package-lock.json), `next build` with
+# output: "export" (static files in out/), then a files-only image with out/ at /site,
+# pushed to GHCR. The shared VPS (static-deploy.sh) follows the `main` tag. The repo has no
+# test suite; the build is the check (next.config.mjs keeps ignoreBuildErrors: true).
+name: Build site image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: site-image
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/nmamano/dice-battler
+  NEXT_TELEMETRY_DISABLED: "1"
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The newest main: a queued run builds what main holds now.
+      - name: Check out main
+        run: git clone --quiet --depth 1 --branch main "https://github.com/${{ github.repository }}.git" .
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          check-latest: true
+      - name: Install and build
+        run: |
+          npm ci --no-audit --no-fund
+          npx next build
+          test -s out/index.html
+      - name: Build and push the image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # One plain linux/amd64 manifest, no attestation index.
+          docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+            --build-arg SITE_DIR=out \
+            --label "org.opencontainers.image.revision=$commit" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            -t "$IMAGE:sha-$commit" -t "$IMAGE:main" --push .
+          docker logout ghcr.io
+          echo "Pushed $IMAGE:sha-$commit (commit $commit)" >> "$GITHUB_STEP_SUMMARY"
